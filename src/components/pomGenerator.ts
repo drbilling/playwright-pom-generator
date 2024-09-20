@@ -1,5 +1,4 @@
-// src/components/PomGenerator.ts
-import { chromium, Browser, Page, ElementHandle } from 'playwright';
+import { chromium, Browser, Page, Locator, ElementHandle } from 'playwright';
 
 interface PageObject {
   name: string;
@@ -49,46 +48,79 @@ export class PomGenerator {
     const pageObjects: PageObject[] = [];
 
     // Identify inputs
-    const inputs = await this.page.$$('input[id], input[name]');
+    const inputs = await this.page.$$('input:visible, textarea:visible');
     for (const input of inputs) {
-      const id = await input.getAttribute('id');
-      const name = await input.getAttribute('name');
-      const type = await input.getAttribute('type') || 'text';
+      const name = await this.getElementName(input);
+      const locator = await this.generateReliableLocator(input);
       pageObjects.push({
-        name: this.generateObjectName(id || name || 'Unknown', type),
+        name: this.generateObjectName({ base: name, type: 'input' }),
         type: 'input',
-        locator: id ? `#${id}` : `input[name="${name}"]`,
+        locator,
       });
     }
 
     // Identify buttons
-    const buttons = await this.page.$$('button, input[type="button"], input[type="submit"]');
+    const buttons = await this.page.$$('button:visible, input[type="button"]:visible, input[type="submit"]:visible');
     for (const button of buttons) {
-      const id = await button.getAttribute('id');
-      const text = await button.innerText();
+      const name = await this.getElementName(button);
+      const locator = await this.generateReliableLocator(button);
       pageObjects.push({
-        name: this.generateObjectName(id || text || 'Unknown', 'button'),
+        name: this.generateObjectName({ base: name, type: 'button' }),
         type: 'button',
-        locator: id ? `#${id}` : `text=${text}`,
+        locator,
       });
     }
 
     // Identify links
-    const links = await this.page.$$('a[href]');
+    const links = await this.page.$$('a:visible');
     for (const link of links) {
-      const id = await link.getAttribute('id');
-      const text = await link.innerText();
+      const name = await this.getElementName(link);
+      const locator = await this.generateReliableLocator(link);
       pageObjects.push({
-        name: this.generateObjectName(id || text || 'Unknown', 'link'),
+        name: this.generateObjectName({ base: name, type: 'link' }),
         type: 'link',
-        locator: id ? `#${id}` : `text=${text}`,
+        locator,
       });
     }
 
     return pageObjects;
   }
 
-  private generateObjectName(base: string, type: string): string {
+  private async getElementName(element: ElementHandle<SVGElement | HTMLElement>): Promise<string> {
+    const id = await element.getAttribute('id');
+    const name = await element.getAttribute('name');
+    const text = await element.innerText();
+    return id || name || text || 'Unknown';
+  }
+
+  private async generateReliableLocator(element: ElementHandle<SVGElement | HTMLElement>): Promise<string> {
+    // Using Playwright's built-in locator strategy
+    const locators = [
+      await element.evaluate((el) => {
+        // This function runs in the browser context
+        const getSelector = (e: Element): string | null => {
+          if (e.id) return `#${e.id}`;
+          if (e.className) return `.${e.className.split(' ').join('.')}`;
+          return null;
+        };
+
+        const selector = getSelector(el);
+        if (selector) return selector;
+
+        const text = el.textContent?.trim();
+        if (text) return `text=${text}`;
+
+        const role = el.getAttribute('role');
+        if (role) return `[role="${role}"]`;
+
+        return null;
+      }),
+    ];
+
+    return locators.filter(Boolean)[0] || 'Unknown';
+  }
+
+  private generateObjectName({ base, type }: { base: string; type: string; }): string {
     return `${base.replace(/[^a-zA-Z0-9]/g, '')}${type.charAt(0).toUpperCase() + type.slice(1)}`;
   }
 
@@ -96,7 +128,7 @@ export class PomGenerator {
     const className = `${title.replace(/[^a-zA-Z0-9]/g, '')}Page`;
 
     const pageObjectProperties = pageObjects.map(obj => 
-      `  private ${obj.name}Locator = '${obj.locator}';`
+      `  ${obj.name} = this.page.locator('${obj.locator}');`
     ).join('\n');
 
     const pageObjectMethods = pageObjects.map(obj => {
@@ -104,25 +136,17 @@ export class PomGenerator {
         case 'input':
           return `
   async fill${obj.name}(value: string) {
-    await this.page.fill(this.${obj.name}Locator, value);
+    await this.${obj.name}.fill(value);
   }
 
   async get${obj.name}Value(): Promise<string> {
-    return await this.page.inputValue(this.${obj.name}Locator);
+    return await this.${obj.name}.inputValue();
   }`;
         case 'button':
-          return `
-  async click${obj.name}() {
-    await this.page.click(this.${obj.name}Locator);
-  }`;
         case 'link':
           return `
   async click${obj.name}() {
-    await this.page.click(this.${obj.name}Locator);
-  }
-
-  async get${obj.name}Href(): Promise<string | null> {
-    return await this.page.getAttribute(this.${obj.name}Locator, 'href');
+    await this.${obj.name}.click();
   }`;
         default:
           return '';
@@ -130,7 +154,7 @@ export class PomGenerator {
     }).join('\n');
 
     return `
-import { Page } from '@playwright/test';
+import { Page, Locator } from '@playwright/test';
 
 export class ${className} {
   constructor(private page: Page) {}
@@ -144,4 +168,4 @@ ${pageObjectProperties}
 ${pageObjectMethods}
 }`;
   }
-}
+} 
